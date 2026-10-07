@@ -2837,5 +2837,7 @@
   "审批记录不存在": "Approval record not found",
   "无效审批状态": "Invalid approval status",
   "无效判定来源": "Invalid determination source",
-  "演示模式不支持旁路提问": "Demo mode does not support bypass queries"
+  "演示模式不支持旁路提问": "Demo mode does not support bypass queries",
+  "无法确认初始化状态": "Unable to confirm setup status",
+  "后端或数据库暂时不可用。为避免覆盖实例上已有的密码，初始化入口已临时关闭——请恢复服务后重试。": "Backend or database is temporarily unavailable. To avoid overwriting an existing password, setup has been disabled until the service recovers."
 }
