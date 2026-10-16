@@ -40,17 +40,20 @@ func (s *Server) wireInterceptReviewer() {
 			}
 		}
 		if profileID == 0 {
-			return intercept.Decision{}, fmt.Errorf("未配置可用的裁判模型")
+			return intercept.Decision{}, intercept.NoRetry(fmt.Errorf("未配置可用的裁判模型"))
 		}
 		prov, _, ok := s.providerForProfile(profileID)
 		if !ok {
-			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
+			return intercept.Decision{ProfileID: profileID}, intercept.NoRetry(fmt.Errorf("裁判模型 profile %d 不可用", profileID))
 		}
 		// Tag this call's usage as the "judge" lane so the config page can report
 		// how much the fallback approval has spent, separate from model profiles.
 		ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
 		text, err := reviewCompletion(ctx, prov, prompt, input)
 		if err != nil {
+			if !isRetryableStreamError(err) {
+				err = intercept.NoRetry(err)
+			}
 			return intercept.Decision{ProfileID: profileID}, err
 		}
 		v := intercept.ParseVerdict(text)
@@ -423,6 +426,10 @@ func (s *Server) interceptGetJudgeConfig(w http.ResponseWriter, r *http.Request)
 func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request) {
 	var req intercept.JudgeConfig
 	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := req.ValidateRetry(); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

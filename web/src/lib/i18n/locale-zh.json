@@ -2839,5 +2839,10 @@
   "无效判定来源": "Invalid determination source",
   "演示模式不支持旁路提问": "Demo mode does not support bypass queries",
   "无法确认初始化状态": "Unable to confirm setup status",
-  "后端或数据库暂时不可用。为避免覆盖实例上已有的密码，初始化入口已临时关闭——请恢复服务后重试。": "Backend or database is temporarily unavailable. To avoid overwriting an existing password, setup has been disabled until the service recovers."
+  "后端或数据库暂时不可用。为避免覆盖实例上已有的密码，初始化入口已临时关闭——请恢复服务后重试。": "Backend or database is temporarily unavailable. To avoid overwriting an existing password, setup has been disabled until the service recovers.",
+  "每次模型判定超时（秒）": "Model decision timeout (seconds)",
+  "审核失败重试次数（0 为不重试）": "Review retry count (0 = no retry)",
+  "审核重试间隔（毫秒）": "Review retry interval (ms)",
+  "仅在审核请求出错、超时或结果无法解析时重试，不会重复执行命令；已返回的放行、拦截或人工审批决定不会重试。": "Retries only when the review request errors, times out, or returns an unparseable result. The tool command is never re-executed, and an already-returned allow/deny/ask verdict is not retried.",
+  "重试仍失败时（出错 / 超时 / 无法解析）": "When model fails (error / timeout / unparsable)"
 }

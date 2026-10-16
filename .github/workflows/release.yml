@@ -100,6 +100,9 @@ jobs:
   #    镜像里只装工具 + 放二进制；arm64 仅需模拟 apt 层，构建快很多）
   docker:
     needs: binaries
+    # Derivative repositories publish binaries without pushing the upstream image.
+    # Set DOCKERHUB_IMAGE explicitly to opt in with a repository-owned image name.
+    if: github.repository == 'Autumn-27/ARTEX' || vars.DOCKERHUB_IMAGE != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4 # 取 Dockerfile 与 skills/
@@ -120,7 +123,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/artex
+          images: ${{ vars.DOCKERHUB_IMAGE || 'autumn27/artex' }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest

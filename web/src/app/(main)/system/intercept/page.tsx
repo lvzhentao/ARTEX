@@ -200,6 +200,8 @@ const defaultJudge = (): JudgeConfig => ({
   profile_id: 0,
   prompt: "",
   timeout_seconds: 15,
+  retry_count: 0,
+  retry_interval_ms: 1000,
   fail_action: "allow",
   ask_timeout_seconds: 300,
   ask_timeout_action: "deny",
@@ -386,6 +388,35 @@ function JudgeCard() {
                     }}
                   />
                 </Field>
+                <Field label="Review retry count (0 = no retry)">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={cfg.retry_count}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (Number.isInteger(n) && n >= 0 && n <= 10) patch({ retry_count: n });
+                    }}
+                  />
+                </Field>
+                <Field label="Review retry interval (ms)">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={60000}
+                    step={100}
+                    value={cfg.retry_interval_ms}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (Number.isInteger(n) && n >= 0 && n <= 60000) patch({ retry_interval_ms: n });
+                    }}
+                  />
+                </Field>
+                <p className="text-xs text-muted-foreground">
+                  Retries only when the review request errors, times out, or returns an unparseable result. The tool command is never
+                  re-executed, and an already-returned allow/deny/ask verdict is not retried.
+                </p>
                 <Field label="When model fails (error / timeout / unparsable)">
                   <Select value={cfg.fail_action} onValueChange={(v) => patch({ fail_action: v as JudgeConfig["fail_action"] })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>

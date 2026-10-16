@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -19,7 +20,7 @@ import (
 // sortFindingsForExport 按严重等级降序、再按时间倒序排,与汇总报告的分组一致。
 func sortFindingsForExport(fs []*db.DBFinding) {
 	sort.SliceStable(fs, func(i, j int) bool {
-		ri, rj := sevRank[fs[i].Severity], sevRank[fs[j].Severity]
+		ri, rj := severityRank(fs[i].Severity), severityRank(fs[j].Severity)
 		if ri != rj {
 			return ri < rj // sevRank 越小越严重
 		}
@@ -137,7 +138,11 @@ func FindingFilename(f *db.DBFinding) string {
 	// 防御性:再剥一层路径,杜绝 zip slip。
 	name = path.Base(name)
 	if len(name) > 120 {
-		name = name[:120]
+		end := 120
+		for !utf8.RuneStart(name[end]) {
+			end--
+		}
+		name = name[:end]
 	}
 	return name + ".md"
 }
