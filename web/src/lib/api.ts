@@ -71,6 +71,9 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  ProxyPoolEntryInput,
+  ProxyPoolState,
+  ProxyPoolTestResult,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -111,6 +114,13 @@ function getToken(): string | null {
   return localStorage.getItem("artex_token");
 }
 
+// The JWT travels in the X-ARTEx-Token header (NOT Authorization: Bearer) so a
+// reverse-proxy front door can demand "Authorization: Basic" — the browser
+// spends Authorization on the gateway challenge, and both credentials coexist
+// on one request. The backend accepts X-ARTEx-Token, Bearer, cookie and ?token=
+// (see server/auth.go extractToken), so direct deployments keep working too.
+export const TOKEN_HEADER = "X-ARTEx-Token";
+
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
   const token = getToken();
@@ -118,7 +128,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { "X-ARTEx-Token": token } : {}),
       ...(init?.headers as Record<string, string> | undefined),
     },
   });
@@ -445,7 +455,7 @@ export const api = {
     const token = getToken();
     const r = await fetch(`/api/workspace/upload?path=${encodeURIComponent(dir)}`, {
       method: "POST",
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { ...(token ? { "X-ARTEx-Token": token } : {}) },
       body: fd,
     });
     if (!r.ok) throw new Error(`Upload failed: ${r.status}`);
@@ -458,7 +468,7 @@ export const api = {
     } else {
       const token = getToken();
       const r = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, {
-        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { ...(token ? { "X-ARTEx-Token": token } : {}) },
       });
       if (!r.ok) throw new Error(`Download failed: ${r.status}`);
       blob = await r.blob();
@@ -572,7 +582,7 @@ export const api = {
     }
     const token = getToken();
     const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: token ? { "X-ARTEx-Token": token } : {},
     });
     if (!r.ok) throw new Error(`export: ${r.status}`);
     const blob = await r.blob();
@@ -646,7 +656,7 @@ export const api = {
     const token = getToken();
     const response = await fetch(
       `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
-      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      { headers: token ? { "X-ARTEx-Token": token } : {} },
     );
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: "Download failed" }));
@@ -821,12 +831,19 @@ export const api = {
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
 
+  // ---- 出口代理池(住宅静态轮询) ----
+  // 明细/开关;条目列表全量替换(default_scheme 补全无 scheme 行的协议)。
+  proxyPool: () => get<ProxyPoolState>(`/proxy-pool`),
+  putProxyPool: (payload: { enabled?: boolean; entries?: ProxyPoolEntryInput[]; default_scheme?: string }) =>
+    put<ProxyPoolState>(`/proxy-pool`, payload),
+  // 逐条经代理访问出口回显服务;urls 空=测池内全部。失败条目自动进入冷却。
+  testProxyPool: (urls: string[]) => post<{ results: ProxyPoolTestResult[] }>(`/proxy-pool/test`, { urls }),
+
   // ---- 漏洞 IM 推送 ----
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -867,7 +884,7 @@ export const api = {
     if (MOCK) return mockReport(task);
     const token = getToken();
     const r = await fetch(`/api/report${tq(task)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: token ? { "X-ARTEx-Token": token } : {},
     });
     if (!r.ok) throw new Error(`report: ${r.status}`);
     return r.text();
@@ -896,7 +913,7 @@ export const api = {
     const token = getToken();
     const r = await fetch(`/api/chat/upload?scope=${scope}&id=${encodeURIComponent(id)}`, {
       method: "POST",
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { ...(token ? { "X-ARTEx-Token": token } : {}) },
       body: fd,
     });
     if (!r.ok) throw new Error(`Upload failed: ${r.status} ${await r.text()}`);
@@ -1157,7 +1174,7 @@ export const api = {
     const r = await fetch(`/api/skills/upload${overwrite ? "?overwrite=true" : ""}`, {
       method: "POST",
       body: fd,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: token ? { "X-ARTEx-Token": token } : {},
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body?.error || `Upload failed(${r.status})`);
@@ -1244,7 +1261,7 @@ export const api = {
     if (MOCK) return { enabled_tools: ["bash"] };
     const token = getToken();
     const r = await fetch("/api/intercept/tool-config", {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: token ? { "X-ARTEx-Token": token } : {},
     });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
@@ -1256,7 +1273,7 @@ export const api = {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(token ? { "X-ARTEx-Token": token } : {}),
       },
       body: JSON.stringify({ enabled_tools: enabledTools }),
     });

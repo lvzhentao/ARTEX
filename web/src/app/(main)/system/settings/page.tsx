@@ -16,6 +16,7 @@ import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSend
 import type { Settings } from "@/lib/types";
 
 import { UpdateCard } from "./_components/update-card";
+import { ProxyPoolCard } from "./_components/proxy-pool-card";
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -98,6 +99,11 @@ export default function SystemSettingsPage() {
       .catch(() => undefined)
       .finally(() => setSaving(false));
   };
+
+  // 代理池等子卡片保存后刷新设置摘要(不重置表单输入,只同步开关/计数类状态)。
+  const reload = React.useCallback(() => {
+    api.settings().then(apply).catch(() => undefined);
+  }, [apply]);
 
   React.useEffect(() => {
     api
@@ -363,6 +369,8 @@ export default function SystemSettingsPage() {
             </p>
           </CardContent>
         </Card>
+
+        <ProxyPoolCard onChanged={reload} />
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

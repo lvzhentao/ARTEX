@@ -19,6 +19,7 @@ import (
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/proxypool"
 	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -245,6 +246,13 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// proxyPool 是进程级出口代理池(住宅静态轮询)。开启(proxyPoolOn)后优先于
+	// globalProxy:MITM 逐请求取号轮换出口,LLM/WebSearch/env 注入走 Next()。
+	// 实例在 NewManager 一次建好,Update 原地换内容——注入到各 provider/回调里的
+	// 引用永远有效,无需重建。nil 仅为测试场景。
+	proxyPool *proxypool.Pool
+	// proxyPoolOn 由 settings.proxy_pool_enabled 控制;关闭时一切回到单代理语义。
+	proxyPoolOn bool
 }
 
 // Settings keys the UI toggles at runtime.
@@ -260,6 +268,10 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
+	// 代理池(住宅静态轮询):entries 存 JSON 数组(proxy_pool_entries),开关另存
+	// proxy_pool_enabled。开启后优先于 global_proxy。
+	settingProxyPoolEntries = "proxy_pool_entries"
+	settingProxyPoolEnabled = "proxy_pool_enabled"
 	settingWorkers     = "workers"
 	settingLLMRecord   = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
@@ -434,11 +446,23 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
+	// 出口代理池:先建进程单例(空池),再加载条目与开关。
+	m.proxyPool = proxypool.New(nil)
+	if raw, ok, _ := pg.GetSetting(settingProxyPoolEntries); ok && strings.TrimSpace(raw) != "" {
+		var entries []proxypool.Entry
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			log.Printf("[proxy-pool] 代理池条目解析失败,按空池处理: %v", err)
+		} else {
+			m.proxyPool.Update(entries)
+		}
+	}
+	m.proxyPoolOn = pg.GetBool(settingProxyPoolEnabled, false)
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
 	}
+	m.applyProxyPool()
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
@@ -560,6 +584,18 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 		on = false
 	}
 	o := agent.WebSearchOpts{Enabled: on, Backend: backend, BraveKey: braveKey, TavilyKey: tavilyKey, Proxy: proxy}
+	// 池开启时,未显式指定搜索代理(空)或显式填 "pool" 的,搜索流量也从池出去。
+	// SDK 按字符串消费该代理,这里取号一次(每次构建 opts 轮换一个出口)。
+	if strings.TrimSpace(proxy) == "" || strings.EqualFold(strings.TrimSpace(proxy), "pool") {
+		m.mu.RLock()
+		p := m.egressPoolLocked()
+		m.mu.RUnlock()
+		if p != nil {
+			if u, _, ok := p.Next(); ok && u != nil {
+				o.Proxy = u.String()
+			}
+		}
+	}
 	if backend == deepSeekWebSearchBackend {
 		o.DeepSeekBaseURL, o.DeepSeekAPIKey, o.DeepSeekModel = m.deepSeekSearchCreds()
 	}
@@ -751,6 +787,13 @@ func (m *Manager) ProxyAddr() string {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// 池开启时每次调用取下一个出口:捕获关闭下 SDK 按字符串消费代理(env 注入/
+	// WebFetch),逐请求轮换做不到,退化为每个 agent run 固定一个、跨 run 轮换。
+	if p := m.egressPoolLocked(); p != nil {
+		if u, _, ok := p.Next(); ok && u != nil {
+			return u.String()
+		}
+	}
 	return m.globalProxy
 }
 
@@ -798,6 +841,105 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
 	return nil
+}
+
+// egressPoolLocked returns the pool when the toggle is on (caller holds mu or
+// accepts racy-but-safe reads: the pool instance itself never changes).
+func (m *Manager) egressPoolLocked() *proxypool.Pool {
+	if !m.proxyPoolOn || m.proxyPool == nil {
+		return nil
+	}
+	return m.proxyPool
+}
+
+// applyProxyPool wires (or unwires) the pool into the MITM's upstream. Pool on:
+// every captured request takes its egress from the pool (per-request rotation).
+// Pool off: the fixed global proxy takes over again. Browser MCP keeps pointing
+// at the MITM address either way, so nothing to resync there.
+func (m *Manager) applyProxyPool() {
+	if m.traffic == nil {
+		return
+	}
+	m.mu.RLock()
+	p := m.egressPoolLocked()
+	m.mu.RUnlock()
+	if p == nil {
+		m.traffic.SetUpstreamProxyFunc(nil)
+		_ = m.traffic.SetUpstreamProxy(m.GlobalProxy())
+		return
+	}
+	m.traffic.SetUpstreamProxyFunc(p.NextURL)
+}
+
+// ProxyPoolRef returns the process pool for injection into LLM configs (nil
+// when disabled). The instance is stable for the process lifetime.
+func (m *Manager) ProxyPoolRef() *proxypool.Pool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.egressPoolLocked()
+}
+
+// ProxyPoolEnabled reports the pool toggle.
+func (m *Manager) ProxyPoolEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.proxyPoolOn
+}
+
+// SetProxyPoolEnabled persists and applies the pool toggle. Switching either
+// way requires a provider rebuild (applyLLM) to rewire LLM egress — the caller
+// (putSettings) does that.
+func (m *Manager) SetProxyPoolEnabled(on bool) error {
+	if err := m.pg.SetBool(settingProxyPoolEnabled, on); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.proxyPoolOn = on
+	m.mu.Unlock()
+	m.applyProxyPool()
+	return nil
+}
+
+// UpdateProxyPool validates, persists and applies a full entry list. Entries
+// are normalized to canonical URLs (bare host:port[:user:pass] lines gain the
+// default scheme) and renumbered; the in-memory pool is updated in place so
+// already-injected references see the new list immediately.
+func (m *Manager) UpdateProxyPool(entries []proxypool.Entry, defaultScheme string) ([]proxypool.EntryStatus, error) {
+	normalized := make([]proxypool.Entry, 0, len(entries))
+	for _, e := range entries {
+		u, err := proxypool.ParseLine(e.URL, defaultScheme)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, proxypool.Entry{URL: u, Enabled: e.Enabled, Note: e.Note})
+	}
+	raw, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.pg.SetSetting(settingProxyPoolEntries, string(raw)); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	pool := m.proxyPool
+	m.mu.RUnlock()
+	if pool == nil {
+		return nil, errors.New("proxy pool not initialized")
+	}
+	pool.Update(normalized)
+	m.applyProxyPool()
+	return pool.Status(), nil
+}
+
+// ProxyPoolStatus returns the pool snapshot (nil-safe: empty when uninitialized).
+func (m *Manager) ProxyPoolStatus() []proxypool.EntryStatus {
+	m.mu.RLock()
+	pool := m.proxyPool
+	m.mu.RUnlock()
+	if pool == nil {
+		return nil
+	}
+	return pool.Status()
 }
 
 func (m *Manager) Close() error {

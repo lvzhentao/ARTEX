@@ -170,7 +170,14 @@ type Traffic struct {
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
 	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
 	upstream atomic.Pointer[url.URL]
+	// picker,非空时每个请求经它取号轮询出口(代理池模式),优先于 upstream 固定
+	// 值。回调返回 nil(池空/全禁用)会让该请求失败而不是直连——绝不泄露真实
+	// 出口 IP。由 SetUpstreamPicker 热切换。
+	picker atomic.Pointer[upstreamPicker]
 }
+
+// upstreamPicker adapts a pool take-a-proxy closure to the atomic.Pointer slot.
+type upstreamPicker func() *url.URL
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
 func Open(dir, addr string) (*Traffic, error) {
@@ -218,7 +225,17 @@ func Open(dir, addr string) (*Traffic, error) {
 	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
 	// every captured request — intercepted AND transparently tunneled — is
 	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
+	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) {
+		if fn := t.picker.Load(); fn != nil {
+			u := (*fn)()
+			if u == nil {
+				// 池空/全禁用:宁可让这条请求失败也不直连,避免泄露真实出口 IP。
+				return nil, errors.New("egress proxy pool exhausted (no enabled entry)")
+			}
+			return u, nil
+		}
+		return t.upstream.Load(), nil
+	})
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
@@ -325,6 +342,19 @@ func (t *Traffic) SetUpstreamProxy(raw string) error {
 	}
 	t.upstream.Store(u)
 	return nil
+}
+
+// SetUpstreamProxyFunc installs a per-request upstream picker (proxy-pool mode):
+// every captured request asks fn for its egress proxy, rotating through pool
+// entries. A nil fn clears it, falling back to the fixed SetUpstreamProxy value.
+// While a picker is installed the fixed upstream is ignored.
+func (t *Traffic) SetUpstreamProxyFunc(fn func() *url.URL) {
+	if fn == nil {
+		t.picker.Store(nil)
+		return
+	}
+	p := upstreamPicker(fn)
+	t.picker.Store(&p)
 }
 
 // ValidateProxyURL parses and checks a proxy URL (http/https/socks5, optional

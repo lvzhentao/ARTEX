@@ -24,6 +24,7 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/proxypool"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
@@ -334,6 +335,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
+	s.poolifyLLMProxy(&cfg, p.Proxy) // 池开启且未显式指定单代理时,LLM 请求逐条轮询池出口
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -505,6 +507,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
+	s.poolifyLLMProxy(&cfg, p.Proxy) // 池开启且未显式指定单代理时,LLM 请求逐条轮询池出口
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -799,6 +802,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("GET /api/proxy-pool", s.getProxyPool)
+	mux.HandleFunc("PUT /api/proxy-pool", s.putProxyPool)
+	mux.HandleFunc("POST /api/proxy-pool/test", s.testProxyPool)
 	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
 	// REST 接口，而不是塞进扁平的 /api/settings 键值里。
 	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
@@ -1322,6 +1328,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	s.poolifyLLMProxy(&cfg, req.Proxy) // 测试请求与真实会话走同一出口(池开启时)
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
 	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
@@ -1381,6 +1388,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	s.poolifyLLMProxy(&cfg, req.Proxy) // 测试请求与真实会话走同一出口(池开启时)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
@@ -3299,6 +3307,10 @@ func (s *Server) settingsPayload() map[string]any {
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
 		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		// 出口代理池摘要(明细走 GET /api/proxy-pool):开启后优先于 global_proxy。
+		"proxy_pool_enabled":  s.m.ProxyPoolEnabled(),
+		"proxy_pool_count":    len(s.m.ProxyPoolStatus()),
+		"proxy_pool_cooling":  countCooling(s.m.ProxyPoolStatus()),
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
@@ -3325,6 +3337,17 @@ func (s *Server) settingsPayload() map[string]any {
 func notifyPublicBaseURL(pg *db.DB) string {
 	v, _, _ := pg.GetSetting(settingNotifyPublicBaseURL)
 	return v
+}
+
+// countCooling 统计快照里冷却中的条数(settings 摘要用)。
+func countCooling(st []proxypool.EntryStatus) int {
+	n := 0
+	for _, e := range st {
+		if e.Cooling {
+			n++
+		}
+	}
+	return n
 }
 
 // notifyDigestIntervalMin 读汇总周期（分钟），非法或未配置时回落到默认值。

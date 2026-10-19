@@ -81,8 +81,18 @@ func verifyJWT(tokenStr string, key []byte) bool {
 }
 
 // extractToken reads the JWT from Authorization: Bearer header,
-// artex_token cookie, or ?token= query param (for SSE connections).
+// X-ARTEx-Token header, artex_token cookie, or ?token= query param (for SSE
+// connections).
+//
+// X-ARTEx-Token exists for the reverse-proxy + basic-auth deployment: the
+// browser spends the Authorization header on nginx's "Authorization: Basic"
+// challenge, leaving no room for "Bearer" on the same request. Frontends behind
+// such a gateway send the JWT via X-ARTEx-Token instead; direct deployments
+// keep using Bearer.
 func extractToken(r *http.Request) string {
+	if h := r.Header.Get("X-ARTEx-Token"); h != "" {
+		return h
+	}
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimPrefix(h, "Bearer ")
 	}

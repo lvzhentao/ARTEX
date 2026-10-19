@@ -926,6 +926,11 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  // 出口代理池摘要(明细走 GET /api/proxy-pool)。开启后所有出口(LLM/MITM 上游/
+  // WebSearch/env 注入)从池内轮询,优先于 global_proxy。
+  proxy_pool_enabled?: boolean; // 默认 false
+  proxy_pool_count?: number; // 条目总数(含禁用)
+  proxy_pool_cooling?: number; // 当前冷却中的条数
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
@@ -947,6 +952,40 @@ export interface Settings {
   notify_enabled?: boolean; // 推送总开关，默认开；用于维护期一键止血
   notify_public_base_url?: string; // 漏洞详情回链的外部访问地址；空=消息不带回链
   notify_digest_interval_min?: number; // 汇总模式周期（分钟），默认 30
+}
+
+// ---- 出口代理池(住宅静态轮询) ----
+
+// ProxyPoolEntry 是池里的一条代理(明细 GET /api/proxy-pool)。
+export interface ProxyPoolEntry {
+  id: number;
+  url: string; // 完整 scheme://user:pass@host:port
+  enabled: boolean;
+  note?: string;
+  cooling?: boolean; // 当前是否冷却中(失败后自动跳过,到期自动恢复)
+  cool_until?: string; // ISO 时间;cooling=true 时有意义
+  cool_reason?: string; // net | forbidden | check
+}
+
+export interface ProxyPoolState {
+  enabled: boolean;
+  entries: ProxyPoolEntry[];
+}
+
+// PUT /api/proxy-pool 的条目输入(id 由后端重排,不需要传)。
+export interface ProxyPoolEntryInput {
+  url: string;
+  enabled: boolean;
+  note?: string;
+}
+
+// POST /api/proxy-pool/test 的单条结果。
+export interface ProxyPoolTestResult {
+  url: string;
+  ok: boolean;
+  latency_ms: number;
+  egress_ip?: string; // 测出的出口 IP
+  error?: string;
 }
 
 // ---- 漏洞 IM 推送 ----

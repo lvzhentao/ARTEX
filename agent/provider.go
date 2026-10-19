@@ -10,6 +10,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,9 +19,11 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/proxypool"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
@@ -38,6 +41,11 @@ type Config struct {
 	// optionally with user:pass@ credentials). Empty means direct — it does NOT
 	// fall back to the standard *_PROXY environment variables.
 	Proxy string
+	// EgressPool,非空时 LLM 请求逐条从代理池轮询出口,优先于上面的单 URL Proxy;
+	// Proxy 填具体 URL 时以 Proxy 为准(显式覆盖,不进池)。由 server 侧在「代理池
+	// 开启且 profile 未显式指定单代理(或显式填 "pool")」时注入;proxypool.Pool
+	// 隐式实现本接口。
+	EgressPool EgressPool
 	// RatePerSecond / RatePerMinute cap the shared request rate across ALL agents
 	// using the provider (0 = that window unlimited).
 	RatePerSecond float64
@@ -254,7 +262,7 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
-	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
+	client, err := quotaAwareHTTPClient(c.Proxy, c.EgressPool, c.SessionHeaderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +405,22 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
-func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
+func quotaAwareHTTPClient(proxy string, pool EgressPool, sessionHeaderKey string) (*http.Client, error) {
+	var base http.RoundTripper
+	if pool != nil {
+		base = &pooledTransport{pool: pool}
+	} else {
+		tr, err := singleProxyTransport(proxy)
+		if err != nil {
+			return nil, err
+		}
+		base = tr
+	}
+	return &http.Client{Transport: quotaAwareTransport{base: base, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
+}
+
+// singleProxyTransport builds the plain single-proxy (or direct) transport.
+func singleProxyTransport(proxy string) (*http.Transport, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
@@ -416,7 +439,55 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
+	return transport, nil
+}
+
+// EgressPool 是 LLM 出口代理池的最小接口(proxypool.Pool 隐式实现)。
+// Next 每次返回池中下一个可用代理(逐请求轮换出口);Fail/OK 上报该次请求的
+// 结果,池据此冷却/解冻条目。
+type EgressPool interface {
+	Next() (proxyURL *url.URL, id int64, ok bool)
+	Fail(id int64, reason string)
+	OK(id int64)
+}
+
+// pooledTransport 让 LLM 请求逐条轮询池出口:每次请求取一个代理,并复用该代理
+// 专属的 http.Transport(独立连接池,KeepAlive 生效)。仅网络层错误(err != nil)
+// 上报冷却——HTTP 403/5xx 更可能是 key/网关问题,误冷却会白白踢掉好代理;SDK
+// 建连重试会再次 Next(),轮询本身就能换到下一个出口。
+type pooledTransport struct {
+	pool EgressPool
+	mu   sync.Mutex
+	trs  map[int64]*http.Transport
+}
+
+func (t *pooledTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	u, id, ok := t.pool.Next()
+	if !ok || u == nil {
+		return nil, errors.New("egress pool: no enabled proxy entry (pool empty or all disabled)")
+	}
+	resp, err := t.transportFor(id, u).RoundTrip(req)
+	if err != nil {
+		t.pool.Fail(id, proxypool.FailReasonNet)
+	} else {
+		t.pool.OK(id)
+	}
+	return resp, err
+}
+
+func (t *pooledTransport) transportFor(id int64, u *url.URL) *http.Transport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.trs == nil {
+		t.trs = make(map[int64]*http.Transport)
+	}
+	if tr, ok := t.trs[id]; ok {
+		return tr
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = http.ProxyURL(u)
+	t.trs[id] = tr
+	return tr
 }
 
 // logTestConnection prints the raw HTTP status code(s) and response body of a

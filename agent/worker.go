@@ -191,6 +191,22 @@ func (w *Worker) SetProxy(addr, caCert string) { w.proxyAddr, w.proxyCACert = ad
 // SetWebSearch selects the web_search backend for this worker (off by default).
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 
+// proxychains 强制代理的注入点（见 proxyEnv 注释）。镜像里 proxychains4 的 so 被
+// 符号链接到统一路径（Dockerfile），配置固定指向容器内常驻的 MITM :8788（其上游
+// 在代理池开启时逐请求轮换住宅出口）。库不存在（本地开发机）时返回 nil，行为退回
+// 纯环境变量代理，不破坏本地 Bash。
+const (
+	proxychainsLib  = "/usr/local/lib/libproxychains4.so"
+	proxychainsConf = "/etc/proxychains4.conf"
+)
+
+func proxychainsEnv() []string {
+	if _, err := os.Stat(proxychainsLib); err != nil {
+		return nil
+	}
+	return []string{"LD_PRELOAD=" + proxychainsLib, "PROXYCHAINS_CONFFILE=" + proxychainsConf}
+}
+
 // proxyEnv builds the Bash-subprocess env that routes child-command HTTP through
 // the egress proxy (the recording MITM when capture is on, or the global proxy
 // directly when it is off) and, only when a MITM CA is present, makes the common
@@ -200,6 +216,9 @@ func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 // GIT_SSL_CAINFO→git, NODE_EXTRA_CA_CERTS→node; NODE_USE_ENV_PROXY makes Node 24+
 // honor the proxy vars. ALL_PROXY is set too so a socks5 egress proxy (which curl
 // only reads from ALL_PROXY, not HTTP(S)_PROXY) works in the capture-off path.
+// On top of the env vars, LD_PRELOAD hooks libc connect() so raw-TCP tools that
+// ignore proxy env vars entirely (nmap/masscan/nc and friends) are forced through
+// the MITM too — the server's real IP never touches a target. Absent lib → skip.
 // Empty proxyAddr → nil (direct, unchanged env).
 func proxyEnv(proxyAddr, caCert string) []string {
 	if proxyAddr == "" {
@@ -210,6 +229,9 @@ func proxyEnv(proxyAddr, caCert string) []string {
 		"http_proxy=" + proxyAddr, "https_proxy=" + proxyAddr,
 		"ALL_PROXY=" + proxyAddr, "all_proxy=" + proxyAddr, // socks5 egress: curl reads only this
 		"NODE_USE_ENV_PROXY=1", // Node 24+: honor HTTP(S)_PROXY in built-in fetch/http
+	}
+	if extra := proxychainsEnv(); extra != nil {
+		env = append(env, extra...)
 	}
 	if caCert != "" {
 		env = append(env,
@@ -290,7 +312,19 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + workerTrafficBlock(caCert != "") + proxyChainsBlock() + workerArtifactSpec(runDir)
+}
+
+// proxyChainsBlock tells the worker its egress is already force-proxied at the
+// system level (LD_PRELOAD, see proxyEnv) — including raw-TCP scanners like nmap
+// that ignore proxy env vars — so it must not hand-configure proxies, pass -k to
+// fight the MITM CA, or waste turns trying to "fix" connectivity. Empty when the
+// local dev environment has no proxychains lib (nothing is forced there).
+func proxyChainsBlock() string {
+	if len(proxychainsEnv()) == 0 {
+		return ""
+	}
+	return "\n\n**网络出口**：本环境已在系统层强制代理全部出站 TCP 连接（含 nmap/nc 等不读代理环境变量的工具），目标看到的来源 IP 均为代理出口。无需为任何工具手工配置代理参数或证书例外，也不要尝试关闭或绕过代理；工具连接异常时优先怀疑目标本身，而不是网络配置。"
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:

@@ -16,7 +16,7 @@ ARG TARGETARCH
 # Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
-      dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
+      dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap proxychains4 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -29,6 +29,17 @@ RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@late
     && playwright-cli --help \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
+# proxychains: LD_PRELOAD 强制代理原始 TCP 工具(nmap/nc 等)。so 链到统一路径(Go 代码写死该路径,
+# 与架构无关);配置指向容器内常驻的 MITM 记录代理 :8788 —— ARTEX 在池开启时把它的上游换成
+# 代理池逐请求轮换,因此经它出站的每个连接都是代理出口,服务器真实 IP 不接触目标。
+RUN ln -sf "$(dpkg -L libproxychains4 | grep "libproxychains.so")" /usr/local/lib/libproxychains4.so \
+    && printf "strict_chain\nproxy_dns\ntcp_read_time_out 15000\ntcp_connect_time_out 10000\n[ProxyList]\nhttp 127.0.0.1 8788\n" > /etc/proxychains4.conf
+
+# nmap wrapper: 末置 -sT 强制 connect 扫描(后置 flag 覆盖用户给的 -sS/-sF 等 raw-socket
+# 扫描类型)。root 下 nmap 默认 -sS 用 raw socket 发包,绕过 LD_PRELOAD 代理钩子,会从
+# 服务器真实 IP 直连目标;-sT 的每次连接都经 libc connect(),被强制走代理出口。
+RUN printf '#!/bin/sh\nexec /usr/bin/nmap "$@" -sT\n' > /usr/local/bin/nmap && chmod +x /usr/local/bin/nmap
+
 WORKDIR /app
 # 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex
