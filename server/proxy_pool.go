@@ -71,9 +71,11 @@ func (s *Server) putProxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		entries := make([]proxypool.Entry, 0, len(*req.Entries))
 		for _, e := range *req.Entries {
-			p := e.Priority
-			if p == 0 {
-				p = prev[e.URL]
+			p := 0
+			if e.Priority != nil {
+				p = *e.Priority
+			} else {
+				p = prev[e.URL] // 面板不带该字段时沿用旧值
 			}
 			entries = append(entries, proxypool.Entry{URL: e.URL, Enabled: e.Enabled, Note: e.Note, Priority: p})
 		}
@@ -96,7 +98,7 @@ type proxyPoolEntry struct {
 	URL      string `json:"url"`
 	Enabled  bool   `json:"enabled"`
 	Note     string `json:"note"`
-	Priority int    `json:"priority"` // 越大越优先，高优先级全部冷却才降级
+	Priority *int   `json:"priority"` // 越大越优先；省略=沿用旧值，显式 0=同梯队
 }
 
 // rebuildAgentsForProxyPool reruns applyLLM so providers pick up (or drop) the
