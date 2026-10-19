@@ -27,11 +27,14 @@ var failTTL = map[string]time.Duration{
 }
 
 // Entry 是池里的一个代理。URL 必须带 scheme(http/https/socks5),认证写进 URL。
+// Priority 越大越优先：取号时先在高优先级梯队内轮询，该梯队全部冷却才降级到
+// 下一档，用于「动态代理为主 + 静态代理兜底」这类分层配置。0 为默认档。
 type Entry struct {
-	ID      int64  `json:"id"`
-	URL     string `json:"url"`
-	Enabled bool   `json:"enabled"`
-	Note    string `json:"note"`
+	ID       int64  `json:"id"`
+	URL      string `json:"url"`
+	Enabled  bool   `json:"enabled"`
+	Note     string `json:"note"`
+	Priority int    `json:"priority"`
 }
 
 // EntryStatus 是给面板的快照条目,附当前冷却状态。
@@ -97,18 +100,33 @@ func (p *Pool) Next() (proxyURL *url.URL, id int64, ok bool) {
 		return nil, 0, false
 	}
 	now := time.Now()
-	// 第一轮:找未冷却且启用的。
-	for i := 0; i < n; i++ {
-		idx := (p.cursor + i) % n
-		e := p.entries[idx]
+	// 第一轮:先找当前可用的最高优先级梯队,只在梯队内轮询——高优先级
+	// 全部冷却/禁用时才轮到下一档(动态代理为主 + 静态代理兜底)。
+	bestP, haveTier := 0, false
+	for _, e := range p.entries {
 		if !e.Enabled {
 			continue
 		}
 		if c, cooling := p.cool[e.ID]; cooling && c.until.After(now) {
 			continue
 		}
-		p.cursor = (idx + 1) % n
-		return parseURL(e.URL), e.ID, true
+		if !haveTier || e.Priority > bestP {
+			bestP, haveTier = e.Priority, true
+		}
+	}
+	if haveTier {
+		for i := 0; i < n; i++ {
+			idx := (p.cursor + i) % n
+			e := p.entries[idx]
+			if !e.Enabled || e.Priority != bestP {
+				continue
+			}
+			if c, cooling := p.cool[e.ID]; cooling && c.until.After(now) {
+				continue
+			}
+			p.cursor = (idx + 1) % n
+			return parseURL(e.URL), e.ID, true
+		}
 	}
 	// 第二轮(降级):全部冷却,取到期最早的启用条目。
 	var best *Entry

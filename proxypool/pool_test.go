@@ -137,3 +137,26 @@ func entriesFrom(st []EntryStatus) []Entry {
 	}
 	return out
 }
+
+// 高优先级梯队优先；该梯队全部冷却后才降级到下一档。
+func TestNextPrefersHigherPriorityTier(t *testing.T) {
+	p := New([]Entry{
+		{URL: "http://backup-a:1", Enabled: true, Priority: 0},
+		{URL: "http://primary:1", Enabled: true, Priority: 10},
+		{URL: "http://backup-b:1", Enabled: true, Priority: 0},
+	})
+	for i := 0; i < 5; i++ {
+		u, _, ok := p.Next()
+		if !ok || u.Host != "primary:1" {
+			t.Fatalf("第 %d 次取号应为 primary，实际 %v", i, u)
+		}
+	}
+	// primary 冷却后应降级到静态梯队，且不再返回 primary。
+	p.Fail(2, FailReasonNet) // ID 2 = primary
+	for i := 0; i < 4; i++ {
+		u, _, ok := p.Next()
+		if !ok || u.Host == "primary:1" {
+			t.Fatalf("primary 冷却后不应再被选中，实际 %v", u)
+		}
+	}
+}

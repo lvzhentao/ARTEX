@@ -911,7 +911,7 @@ func (m *Manager) UpdateProxyPool(entries []proxypool.Entry, defaultScheme strin
 		if err != nil {
 			return nil, err
 		}
-		normalized = append(normalized, proxypool.Entry{URL: u, Enabled: e.Enabled, Note: e.Note})
+		normalized = append(normalized, proxypool.Entry{URL: u, Enabled: e.Enabled, Note: e.Note, Priority: e.Priority})
 	}
 	raw, err := json.Marshal(normalized)
 	if err != nil {

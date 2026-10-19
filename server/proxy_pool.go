@@ -63,9 +63,19 @@ func (s *Server) putProxyPool(w http.ResponseWriter, r *http.Request) {
 		enabledChanged = true
 	}
 	if req.Entries != nil {
+		// 面板暂不展示优先级：客户端未带 priority(0) 时沿用同 URL 旧条目的值，
+		// 避免在界面保存一次就把「动态为主」的梯队配置清掉。
+		prev := map[string]int{}
+		for _, st := range s.m.ProxyPoolStatus() {
+			prev[st.URL] = st.Priority
+		}
 		entries := make([]proxypool.Entry, 0, len(*req.Entries))
 		for _, e := range *req.Entries {
-			entries = append(entries, proxypool.Entry{URL: e.URL, Enabled: e.Enabled, Note: e.Note})
+			p := e.Priority
+			if p == 0 {
+				p = prev[e.URL]
+			}
+			entries = append(entries, proxypool.Entry{URL: e.URL, Enabled: e.Enabled, Note: e.Note, Priority: p})
 		}
 		if _, err := s.m.UpdateProxyPool(entries, req.DefaultScheme); err != nil {
 			writeErr(w, 400, err.Error())
@@ -83,9 +93,10 @@ func (s *Server) putProxyPool(w http.ResponseWriter, r *http.Request) {
 }
 
 type proxyPoolEntry struct {
-	URL     string `json:"url"`
-	Enabled bool   `json:"enabled"`
-	Note    string `json:"note"`
+	URL      string `json:"url"`
+	Enabled  bool   `json:"enabled"`
+	Note     string `json:"note"`
+	Priority int    `json:"priority"` // 越大越优先，高优先级全部冷却才降级
 }
 
 // rebuildAgentsForProxyPool reruns applyLLM so providers pick up (or drop) the
