@@ -1334,11 +1334,11 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			WHERE exploration_id=task.exploration_id AND kind='result'
 		) token_metrics ON true
 		LEFT JOIN LATERAL (
-			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
+			-- 用 max() 取最后活跃：EXTRACT 出现在 ORDER BY 表达式里时规划器
+			-- 认不出 idx_act_latest 的顺序，会退化成扫该 exploration 的全部 activity。
+			SELECT EXTRACT(EPOCH FROM max(created_at))::bigint AS created_at
 			FROM activity
 			WHERE exploration_id=task.exploration_id
-			ORDER BY created_at DESC
-			LIMIT 1
 		) latest_activity ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) AS total,
