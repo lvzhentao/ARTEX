@@ -568,13 +568,15 @@ function ProfileSheet({
             <Input
               id="p-proxy"
               className="font-mono"
-              placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
+              placeholder="direct · pool · socks5://user:pass@127.0.0.1:1080"
               value={proxy}
               onChange={(e) => setProxy(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">
               Only outbound LLM requests use this proxy; supports http/https/socks5 and can include username/password (e.g.,
-              socks5://user:pass@host:port, Passwords with special characters require URL encoding); leave empty to disable proxy (direct connection).
+              socks5://user:pass@host:port, Passwords with special characters require URL encoding). Leave empty to follow the
+              Egress Proxy Pool when it is enabled; enter <code className="font-mono">direct</code> to always connect from this
+              server's own IP.
             </p>
           </div>
 

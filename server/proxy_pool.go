@@ -211,11 +211,26 @@ func checkEgress(raw string) proxyPoolTestResult {
 // poolifyLLMProxy 在「代理池开启」且 profile 未显式指定单代理(空)或显式要求走池
 // (填 "pool")时,把进程级代理池注入 LLM 配置,使该 profile 的请求逐条轮询出口。
 // 显式 URL 优先——个别 profile 想固定走某个代理时不受池影响。
+// 填 "direct"/"none"/"off" 表示强制直连:清掉 profile 里可能残留的代理值,也不注入池。
 func (s *Server) poolifyLLMProxy(cfg *agent.Config, explicitProxy string) {
 	p := strings.TrimSpace(explicitProxy)
+	if isDirectProxy(p) {
+		cfg.Proxy = ""
+		cfg.EgressPool = nil
+		return
+	}
 	if p == "" || strings.EqualFold(p, "pool") {
 		if pool := s.m.ProxyPoolRef(); pool != nil {
 			cfg.EgressPool = pool
 		}
 	}
+}
+
+// isDirectProxy 判断 profile 的 proxy 字段是否表达「直连」。
+func isDirectProxy(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "direct", "direct://", "none", "off":
+		return true
+	}
+	return false
 }
