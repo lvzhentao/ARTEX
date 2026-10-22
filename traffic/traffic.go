@@ -225,7 +225,16 @@ func Open(dir, addr string) (*Traffic, error) {
 	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
 	// every captured request — intercepted AND transparently tunneled — is
 	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) {
+	p.SetUpstreamProxy(func(req *http.Request) (*url.URL, error) {
+		// 依赖下载源直连：住宅代理带宽小、抖动大，pip/npm/apt 拉包会被拖到超时；
+		// 这些域名属于构建物料而非渗透目标，直接从服务器出口下载。
+		host := req.Host
+		if req.URL != nil && req.URL.Host != "" {
+			host = req.URL.Host
+		}
+		if isDirectDownloadHost(host) {
+			return nil, nil
+		}
 		if fn := t.picker.Load(); fn != nil {
 			u := (*fn)()
 			if u == nil {
@@ -315,6 +324,35 @@ func hostOnly(hostport string) string {
 		return h
 	}
 	return hostport
+}
+
+// directDownloadHosts 是包管理器/工具链的依赖下载源。这类流量不走代理池，直接从
+// 服务器出口下载：住宅代理带宽小、抖动大，pip/npm/apt 拉包常被拖到超时。只列
+// 「拉依赖」的域名；github 等既可能是下载源也可能是渗透目标，保留走代理。
+var directDownloadHosts = []string{
+	"pypi.org", "files.pythonhosted.org", "pythonhosted.org",
+	"registry.npmjs.org", "npmjs.org", "registry.npmmirror.com", "npmmirror.com",
+	"nodejs.org", "nodejs.cn",
+	"deb.debian.org", "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com",
+	"proxy.golang.org", "sum.golang.org", "goproxy.cn", "goproxy.io",
+	"crates.io", "static.crates.io", "index.crates.io",
+	"rubygems.org", "repo.anaconda.com", "conda.anaconda.org",
+	"mirrors.aliyun.com", "mirrors.tuna.tsinghua.edu.cn", "mirrors.cloud.tencent.com",
+	"download.pytorch.org", "huggingface.co", "cdn-lfs.huggingface.co",
+}
+
+// isDirectDownloadHost 判断请求主机是否属于「下载源直连」白名单（按后缀匹配子域）。
+func isDirectDownloadHost(host string) bool {
+	h := strings.ToLower(hostOnly(host))
+	if h == "" {
+		return false
+	}
+	for _, d := range directDownloadHosts {
+		if h == d || strings.HasSuffix(h, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProxyAddr returns the address workers should set as HTTP(S)_PROXY. A bare
