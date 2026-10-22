@@ -1130,6 +1130,18 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if err != nil {
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
+	// 进程关闭/重启导致的取消不是失败：把意图退回 open，重启后 worker 直接重新领取，
+	// 用户不必再在对话框里补一句「继续」。
+	if err != nil {
+		if code, _, _, ok := agent.AbortReason(ectx); ok && code == "shutdown" {
+			if stateErr := transitionIntentState(t.Store, intent.ID, "running", "open"); stateErr != nil {
+				log.Printf("[worker %s] task %s 意图 #%d 关闭退回 open 失败: %v", name, t.ID, intent.ID, stateErr)
+			}
+			log.Printf("[worker %s] task %s 意图 #%d 因后端关闭退回 open，重启后自动续跑", name, t.ID, intent.ID)
+			e.touch(t.ID)
+			return true
+		}
+	}
 	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
 	state := "done"
